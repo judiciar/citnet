@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+# Server care ruleaza reteaua neuronala CitNet, instalat
+# ca daemon (serviciu) si care poate fi apelat prin HTTP
+# CitNet foloseste modelul EfficientNet (vezi https://arxiv.org/abs/1905.11946)
+
+# FOLOSIRE
+# citnetd <incoming port> <networkmodel.json> <networkweights.hdf5>
+# citnetd 1102 model.json modelweights.hdf5
+# Fara argumente, se incarca valorile default
+
+# importa pachetele necesare
+from os.path import splitext, basename, dirname, isfile
+from os import remove, chdir, environ
+environ["TF_CPP_MIN_LOG_LEVEL"] = "2" 
+import warnings
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    from keras.preprocessing.image import img_to_array
+    from keras.models import Sequential, model_from_json
+    from keras.layers import Dense
+    from keras.optimizers import Adam
+    from efficientnet.keras import EfficientNetB0
+from flask import Flask, request
+import numpy as np
+import bjoern
+import cv2
+import subprocess
+import sys
+import time
+
+default_modelfile = "/home/localadmin/citnet/citnet_model.json"
+default_weightsfile = (
+    "/home/localadmin/citnet/citnet_weights-20.03-acc1.0000-val_acc1.0000.hdf5"
+)
+default_port = 1102
+default_tempfolder = "/home/localadmin/citnet/temp/"
+
+
+def shareinstanta(argument):
+    switcher = {
+        "0": "/mnt/cagl/",
+        "1": "/mnt/cagldoc/",
+        "2": "/mnt/trgl/",
+        "3": "/mnt/jdgl/",
+        "4": "/mnt/jdtecuci/",
+        "5": "/mnt/jdtgb/",
+        "6": "/mnt/jdliesti/",
+        "7": "/mnt/trvn/",
+        "8": "/mnt/jdfocsani/",
+        "9": "/mnt/jdpanciu/",
+        "10": "/mnt/jdadjud/",
+        "11": "/mnt/br/TrBraila/",
+        "12": "/mnt/br/JdBraila/",
+        "13": "/mnt/jdfaurei/",
+    }
+    return switcher.get(argument, "error")
+
+
+def citnet(robot, idinstanta, pathfile, model):
+    # verifica daca fisierul exista si converteste calea pentru linux si mounted share
+    pathfile = pathfile.replace("\\", "/")
+    if not isfile(pathfile):
+        partialname = basename(dirname(pathfile)) + "/" + basename(pathfile)
+        if idinstanta == "1" and robot == "cit" and pathfile.find("10.20.48.97") == -1:
+            idinstanta = "0"
+        cale = shareinstanta(idinstanta)
+        if cale == "error":
+            print(
+                "robot:{} idinstanta:{}=eroare \n {}".format(
+                    robot, idinstanta, pathfile
+                )
+            )
+            return "nofile"
+        pathfile = cale + partialname
+        if not isfile(pathfile):  # verifica calea din nou dupa conversie
+            print(
+                "robot:{} idinstanta:{} \n {} = nofile".format(
+                    robot, idinstanta, pathfile
+                )
+            )
+            return "nofile"
+
+    # conversia fisierului PDF
+    fname = basename(pathfile)  # salveaza numele fisierului fara cale
+    p = subprocess.Popen(
+        'cp -f "'
+        + pathfile
+        + '" .;'
+        + 'convert xc:white[128x256\!] -respect-parenthesis \( "'
+        + fname
+        + '"[0-1] -resize 595x842\> -background white -extent 595x842 -resize 128x128! -append \) -composite -set colorspace Gray -depth 8 -strip "'
+        + splitext(fname)[0]
+        + '.jpg"',
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    for line in p.stdout.readlines():
+        print(line.decode("utf-8"))
+    p.wait()
+
+    # incarca imaginea
+    orig = cv2.imread(splitext(fname)[0] + ".jpg", cv2.IMREAD_COLOR)
+    # preproceseaza imaginea (dimensiunea trebuie sa fie 64x128 pixeli),
+    # intensitatea pixelilor urmand a fi redimensionata in intervalul [0, 1]
+    image = orig.astype("float") / 255.0
+    # image = cv2.resize(image, (64, 128))
+    # ordoneaza canalele imaginii (canalele la inceput sau canalele la sfarsit)
+    # in functie de Keras backend, dupa care adauga o dimensiune batch imaginii
+    image = img_to_array(image)
+    image = np.expand_dims(image, axis=0)
+
+    # evalueaza imaginea cu ajutorul retelei neur(on)ale
+    pred = model.predict(image)
+    # pred[0][0] este probabilitatea de 'citatii',
+    # pred[0][1] este probabilitatea de 'documente'
+    label = "documente" if pred[0][0] <= 0.5 else "citatii"
+    print(
+        "robot:{} idinstanta:{} \n {} - {} scor: {:.4f}".format(
+            robot, idinstanta, pathfile, label, pred[0][np.argmax(pred[0])]
+        )
+    )
+    remove(fname)
+    remove(splitext(fname)[0] + ".jpg")
+    return label
+
+
+app = Flask(__name__)
+
+
+@app.route("/query")
+def query():
+    tinitial = time.time()
+    robot = str(request.args.get("robot"))
+    idinstanta = str(request.args.get("idinstanta"))
+    pathfile = str(request.args.get("pathfile"))
+    try:
+        response = citnet(robot, idinstanta, pathfile, model)
+    except:
+        response = "citnetError"
+        print(
+            "robot:{} idinstanta:{} \n {} {}".format(
+                robot, idinstanta, pathfile, response
+            )
+        )
+    print(" am raspuns in {:.3f} secunde".format(time.time() - tinitial))
+    return response
+
+
+if __name__ == "__main__":
+    # verifica argumentele din linia de comanda
+    if len(sys.argv) == 4:
+        port, modelfile, weightsfile = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+    else:
+        port, modelfile, weightsfile = (
+            default_port,
+            default_modelfile,
+            default_weightsfile,
+        )
+        print(
+            "[INFO] argumente insuficiente furnizate. Folosesc valorile default:\n port:",
+            port,
+            "modelfile:",
+            modelfile,
+            "\n weightsfile:",
+            weightsfile,
+        )
+    if not isfile(modelfile):
+        print("Nu am gasit", modelfile)
+        sys.exit(2)
+
+    if not isfile(weightsfile):
+        print("Nu am gasit", weightsfile)
+        sys.exit(2)
+
+    # intra in directorul de lucru
+    chdir(default_tempfolder)
+
+    # incarca reteaua neur(on)ala
+    print("[INFO] incarc reteaua neuronala CitNet")
+    json_file = open(modelfile, "r")
+    model_json = json_file.read()
+    json_file.close()
+    model = model_from_json(model_json)
+    model.load_weights(weightsfile)
+
+    # ruleaza server bjoern cu app flask
+    print("[INFO] astept conexiuni pe portul", port)
+    bjoern.run(app, "0.0.0.0", port)

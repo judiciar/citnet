@@ -1,0 +1,6 @@
+pdf/
+temp/
+data_original/
+dataset/
+*.hdf5
+!citnet_weights-20.03-acc1.0000-val_acc1.0000.hdf5

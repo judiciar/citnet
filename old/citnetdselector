@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+
+# USAGE
+# citnetd <incoming port> <neural network modelname.hdf5>
+# citnetd 1102 modelname.hdf5
+
+# importa pachetele necesare
+import warnings
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    from keras.preprocessing.image import img_to_array
+    from keras.models import load_model
+from os.path import splitext, basename, dirname, isfile
+import numpy as np
+from os import remove
+import cv2
+import subprocess
+import sys
+import socket
+import selectors
+import types
+import re
+
+
+def shareinstanta(argument):
+    switcher = {
+        "0": "/mnt/cagl/",
+        "1": "/mnt/cagldoc/",
+        "2": "/mnt/trgl/",
+        "3": "/mnt/jdgl/",
+        "4": "/mnt/jdtecuci/",
+        "5": "/mnt/jdtgb/",
+        "6": "/mnt/jdliesti/",
+        "7": "/mnt/trvn/",
+        "8": "/mnt/jdfocsani/",
+        "9": "/mnt/jdpanciu/",
+        "10": "/mnt/jdadjud/",
+        "11": "/mnt/br/TrBraila/",
+        "12": "/mnt/br/JdBraila/",
+        "13": "/mnt/jdfaurei/",
+    }
+    return switcher.get(argument, "nofile")
+
+
+def citnet(robot, idinstanta, pathfile, model):
+    # verifica daca fisierul exista si converteste calea pentru linux si mounted share
+    pathfile = pathfile.replace("\\", "/")
+    if not isfile(pathfile):
+        partialname = basename(dirname(pathfile)) + "/" + basename(pathfile)
+        if idinstanta == "1" and robot == "cit" and pathfile.find("10.20.48.97") == -1:
+            idinstanta = "0"
+        cale = shareinstanta(idinstanta)
+        if cale == "error":
+            print(
+                "robot:{} idinstanta:{}=eroare \n {}".format(
+                    robot, idinstanta, pathfile
+                )
+            )
+            return "nofile"
+        pathfile = cale + partialname
+        if not isfile(pathfile):  # verifica calea din nou dupa conversie
+            print(
+                "robot:{} idinstanta:{} \n {} = nofile".format(
+                    robot, idinstanta, pathfile
+                )
+            )
+            return "nofile"
+
+    # conversia fisierului PDF
+    fname = basename(pathfile)  # salveaza numele fisierului fara cale
+    p = subprocess.Popen(
+        'cp -f "'
+        + pathfile
+        + '" .;'
+        + 'convert xc:white[64x128\!] -respect-parenthesis \( "'
+        + fname
+        + '"[0-1] -resize 595x842\> -background white -extent 595x842 -resize 64x64! -append \) -composite -set colorspace Gray -depth 8 -strip "'
+        + splitext(fname)[0]
+        + '.tif"',
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    for line in p.stdout.readlines():
+        print(line.decode("utf-8"))
+    p.wait()
+
+    # incarca imaginea
+    orig = cv2.imread(splitext(fname)[0] + ".tif", cv2.IMREAD_GRAYSCALE)
+    # preproceseaza imaginea (dimensiunea trebuie sa fie 64x128 pixeli),
+    # intensitatea pixelilor urmand a fi redimensionata in intervalul [0, 1]
+    image = orig.astype("float") / 255.0
+    # image = cv2.resize(image, (64, 128))
+    # ordoneaza canalele imaginii (canalele la inceput sau canalele la sfarsit)
+    # in functie de Keras backend, dupa care adauga o dimensiune batch imaginii
+    image = img_to_array(image)
+    image = np.expand_dims(image, axis=0)
+
+    # evalueaza imaginea cu ajutorul retelei neur(on)ale
+    with graph.as_default():
+        pred = model.predict(image)
+    # pred[0][0] este probabilitatea de 'citatii',
+    # pred[0][1] este probabilitatea de 'documente'
+    label = "documente" if pred[0][0] <= 0.5 else "citatii"
+    print(
+        "robot:{} idinstanta:{} \n {} - {} scor: {:.4f}".format(
+            robot, idinstanta, pathfile, label, pred[0][np.argmax(pred[0])]
+        )
+    )
+    remove(fname)
+    remove(splitext(fname)[0] + ".tif")
+    return label
+
+
+def accept_wrapper(sock):
+    conn, addr = sock.accept()
+    print("accepta conexiune de la", addr)
+    conn.setblocking(False)
+    data = types.SimpleNamespace(addr=addr, inb=b"", outb=b"")
+    events = selectors.EVENT_READ | selectors.EVENT_WRITE
+    sel.register(conn, events, data=data)
+
+
+def service_connection(key, mask):
+    sock = key.fileobj
+    data = key.data
+    if mask & selectors.EVENT_READ:
+        recv_data = sock.recv(1024)
+        if recv_data:
+            data.outb += recv_data
+        else:
+            print("inchide conexiunea catre", data.addr)
+            sel.unregister(sock)
+            sock.close()
+    if mask & selectors.EVENT_WRITE:
+        if data.outb:
+            pathfile = data.outb.decode("utf-8")
+            try:
+                response = citnet(pathfile, model)
+            except:
+                response = "citnetError"
+            sock.send(response.encode("utf-8"))
+            print(pathfile, "- raspunde", response, "lui", data.addr)
+            data.outb = []
+
+
+if __name__ == "__main__":
+    sel = selectors.DefaultSelector()
+    if len(sys.argv) != 3:
+        print("folosire:", sys.argv[0], "<port> <modelname.hdf5>")
+        sys.exit(2)
+
+    host, port, modelfile = "", int(sys.argv[1]), sys.argv[2]
+
+    if not isfile(modelfile):
+        print("Nu am gasit", modelfile)
+        sys.exit(2)
+
+    # incarca reteaua neur(on)ala
+    print("[INFO] incarc reteaua neur(on)ala CitNet")
+    model = load_model(modelfile)
+
+    # lansez server ce permite conexiuni multiple
+    lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    lsock.bind((host, port))
+    lsock.listen()
+    print("accept conexiuni pe portul", port)
+    lsock.setblocking(False)
+    sel.register(lsock, selectors.EVENT_READ, data=None)
+
+    try:
+        while True:
+            events = sel.select(timeout=None)
+            for key, mask in events:
+                if key.data is None:
+                    accept_wrapper(key.fileobj)
+                else:
+                    service_connection(key, mask)
+    except KeyboardInterrupt:
+        print("s-a apasat ctrl-c, ma opresc")
+    finally:
+        sel.close()

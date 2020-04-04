@@ -1,0 +1,16 @@
+[Unit]
+Description=Daemon CitNet Neural Network CA Galati
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u /home/localadmin/citnet/citnetd
+ExecStop=/bin/kill -- $MAINPID
+KillMode=control-group
+RemainAfterExit=no
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=multi-user.target
