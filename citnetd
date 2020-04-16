@@ -30,7 +30,7 @@ import time
 
 default_modelfile = "/home/localadmin/citnet/citnet_model.json"
 default_weightsfile = (
-    "/home/localadmin/citnet/citnet_weights-20.03-acc1.0000-val_acc1.0000.hdf5"
+    "/home/localadmin/citnet/citnet_weights-16.04-acc1.0000-val_acc1.0000.hdf5"
 )
 default_port = 1102
 default_tempfolder = "/home/localadmin/citnet/temp/"
